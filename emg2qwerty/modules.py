@@ -278,3 +278,84 @@ class TDSConvEncoder(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.tds_conv_blocks(inputs)  # (T, N, num_features)
+
+
+#GRU Class - JC
+class GRUEncoder(nn.Module):
+    """A GRU-based temporal encoder.
+
+    Input:
+        (T, N, num_features)
+
+    Output:
+        (T, N, output_features)
+
+    If output_features is left as None, it defaults to num_features so this
+    encoder can be swapped in place of TDSConvEncoder with minimal changes.
+    """
+
+    def __init__(
+        self,
+        num_features: int,
+        hidden_size: int = 256,
+        num_layers: int = 2,
+        dropout: float = 0.1,
+        bidirectional: bool = True,
+        output_features: int | None = None,
+    ) -> None:
+        super().__init__()
+
+        self.num_features = num_features
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bidirectional = bidirectional
+
+        # If output_features is not specified, preserve the original feature size
+        self.output_features = output_features or num_features
+
+        self.gru = nn.GRU(
+            input_size=num_features,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=bidirectional,
+            batch_first=False,   # matches (T, N, C)
+        )
+
+        gru_output_size = hidden_size * (2 if bidirectional else 1)
+
+        self.dropout = nn.Dropout(dropout)
+        self.proj = nn.Linear(gru_output_size, self.output_features)
+        self.layer_norm = nn.LayerNorm(self.output_features)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            inputs: Tensor of shape (T, N, num_features)
+
+        Returns:
+            Tensor of shape (T, N, output_features)
+        """
+        x, _ = self.gru(inputs)                  # (T, N, hidden*dirs)
+        x = self.dropout(x)
+        x = self.proj(x)                         # (T, N, output_features)
+
+        # Residual connection only when shapes match
+        if x.shape == inputs.shape:
+            x = x + inputs
+
+        x = self.layer_norm(x)
+        return x
+
+
+
+
+
+
+
+
+
+
+
+
+
