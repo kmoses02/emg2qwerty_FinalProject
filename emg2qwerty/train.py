@@ -54,9 +54,9 @@ def main(config: DictConfig):
         return transforms.Compose([instantiate(cfg) for cfg in configs])
 
     # Instantiate LightningModule
-    log.info(f"Instantiating LightningModule {config.module}")
+    log.info(f"Instantiating LightningModule {config.model}")
     module = instantiate(
-        config.module,
+        config.model,
         optimizer=config.optimizer,
         lr_scheduler=config.lr_scheduler,
         decoder=config.decoder,
@@ -116,10 +116,14 @@ def main(config: DictConfig):
     val_metrics = trainer.validate(module, datamodule)
     test_metrics = trainer.test(module, datamodule)
 
+    best_checkpoint = None
+    if hasattr(trainer, "checkpoint_callback") and trainer.checkpoint_callback is not None:
+        best_checkpoint = trainer.checkpoint_callback.best_model_path
+
     results = {
         "val_metrics": val_metrics,
         "test_metrics": test_metrics,
-        "best_checkpoint": trainer.checkpoint_callback.best_model_path,
+        "best_checkpoint": best_checkpoint,
     }
     pprint.pprint(results, sort_dicts=False)
 
