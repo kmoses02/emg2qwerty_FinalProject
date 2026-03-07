@@ -24,6 +24,7 @@ from emg2qwerty.metrics import CharacterErrorRates
 from emg2qwerty.modules import (
     MultiBandRotationInvariantMLP,
     SpectrogramNorm,
+    RNNEncoder,
     TDSConvEncoder,
 )
 from emg2qwerty.transforms import Transform
@@ -235,6 +236,155 @@ class TDSConvCTCModule(pl.LightningModule):
         for i in range(N):
             # Unpad targets (T, N) for batch entry
             target = LabelData.from_labels(targets[: target_lengths[i], i])
+            metrics.update(prediction=predictions[i], target=target)
+
+        self.log(f"{phase}/loss", loss, batch_size=N, sync_dist=True)
+        return loss
+
+    def _epoch_end(self, phase: str) -> None:
+        metrics = self.metrics[f"{phase}_metrics"]
+        self.log_dict(metrics.compute(), sync_dist=True)
+        metrics.reset()
+
+    def training_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("train", *args, **kwargs)
+
+    def validation_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("val", *args, **kwargs)
+
+    def test_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("test", *args, **kwargs)
+
+    def on_train_epoch_end(self) -> None:
+        self._epoch_end("train")
+
+    def on_validation_epoch_end(self) -> None:
+        self._epoch_end("val")
+
+    def on_test_epoch_end(self) -> None:
+        self._epoch_end("test")
+
+    def configure_optimizers(self) -> dict[str, Any]:
+        return utils.instantiate_optimizer_and_scheduler(
+            self.parameters(),
+            optimizer_config=self.hparams.optimizer,
+            lr_scheduler_config=self.hparams.lr_scheduler,
+        )
+    
+class RNNCTCModule(pl.LightningModule):
+    """
+    Args:
+        in_features (int): Number of frequency bins × electrode channels fed
+            into the MLP (e.g. 528 for the default spectrogram config).
+        mlp_features (list[int]): Output sizes for each MLP layer.
+        hidden_size (int): Hidden size per direction for the RNN. (default: 256)
+        num_layers (int): Number of stacked RNN layers. (default: 3)
+        rnn_type (str): ``"LSTM"`` or ``"GRU"``. (default: ``"LSTM"``)
+        dropout (float): Dropout between RNN layers. (default: 0.2)
+        bidirectional (bool): Use bidirectional RNN. (default: True)
+        optimizer (DictConfig): Hydra config for the optimizer.
+        lr_scheduler (DictConfig): Hydra config for the LR scheduler.
+        decoder (DictConfig): Hydra config for the CTC decoder.
+    """
+
+    NUM_BANDS: ClassVar[int] = 2
+    ELECTRODE_CHANNELS: ClassVar[int] = 16
+
+    def __init__(
+        self,
+        in_features: int,
+        mlp_features: Sequence[int],
+        hidden_size: int,
+        num_layers: int,
+        rnn_type: str,
+        dropout: float,
+        bidirectional: bool,
+        optimizer: DictConfig,
+        lr_scheduler: DictConfig,
+        decoder: DictConfig,
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+
+        num_features = self.NUM_BANDS * mlp_features[-1]
+        #model
+        # inputs: (T, N, bands=2, electrode_channels=16, freq)
+        self.model = nn.Sequential(
+            SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
+            # (T, N, bands=2, mlp_features[-1])
+            MultiBandRotationInvariantMLP(
+                in_features=in_features,
+                mlp_features=mlp_features,
+                num_bands=self.NUM_BANDS,
+            ),
+            # (T, N, num_features)
+            nn.Flatten(start_dim=2),
+            # (T, N, num_features)  [same shape in/out thanks to projection]
+            RNNEncoder(
+                num_features=num_features,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                rnn_type=rnn_type,
+                dropout=dropout,
+                bidirectional=bidirectional,
+            ),
+            # (T, N, num_classes)
+            nn.Linear(num_features, charset().num_classes),
+            nn.LogSoftmax(dim=-1),
+        )
+        # Criterion
+        self.ctc_loss = nn.CTCLoss(blank=charset().null_class)
+
+        # Decoder
+        self.decoder = instantiate(decoder)
+
+        # Metrics
+        metrics = MetricCollection([CharacterErrorRates()])
+        self.metrics = nn.ModuleDict(
+            {
+                f"{phase}_metrics": metrics.clone(prefix=f"{phase}/")
+                for phase in ["train", "val", "test"]
+            }
+        )
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.model(inputs)
+
+    def _step(
+        self, phase: str, batch: dict[str, torch.Tensor], *args, **kwargs
+    ) -> torch.Tensor:
+        inputs = batch["inputs"]
+        targets = batch["targets"]
+        input_lengths = batch["input_lengths"]
+        target_lengths = batch["target_lengths"]
+        N = len(input_lengths)
+
+        emissions = self.forward(inputs)
+
+        # The RNN does not shorten the time axis, so emission_lengths ==
+        # input_lengths.  We still derive T_diff defensively in case
+        # something upstream ever pads/crops the sequence.
+        T_diff = inputs.shape[0] - emissions.shape[0]
+        emission_lengths = input_lengths - T_diff
+
+        loss = self.ctc_loss(
+            log_probs=emissions,          # (T, N, num_classes)
+            targets=targets.transpose(0, 1),  # (N, T)
+            input_lengths=emission_lengths,
+            target_lengths=target_lengths,
+        )
+
+        # Decode
+        predictions = self.decoder.decode_batch(
+            emissions=emissions.detach().cpu().numpy(),
+            emission_lengths=emission_lengths.detach().cpu().numpy(),
+        )
+
+        # Update metrics
+        metrics = self.metrics[f"{phase}_metrics"]
+        targets_np = targets.detach().cpu().numpy()
+        target_lengths_np = target_lengths.detach().cpu().numpy()
+        for i in range(N):
+            target = LabelData.from_labels(targets_np[: target_lengths_np[i], i])
             metrics.update(prediction=predictions[i], target=target)
 
         self.log(f"{phase}/loss", loss, batch_size=N, sync_dist=True)
