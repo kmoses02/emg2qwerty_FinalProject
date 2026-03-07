@@ -85,17 +85,22 @@ def main(config: DictConfig):
         test_transform=_build_transform(config.transforms.test),
         _convert_="object",
     )
-
+	
     # Instantiate callbacks
     callback_configs = config.get("callbacks", [])
     callbacks = [instantiate(cfg) for cfg in callback_configs]
+
+    # Instantiate loggers
+    logger_configs = config.get("loggers", [])
+    loggers = [instantiate(cfg) for cfg in logger_configs] if logger_configs else True
 
     # Initialize trainer
     trainer = pl.Trainer(
         **config.trainer,
         callbacks=callbacks,
+        logger=loggers,
     )
-
+	
     if config.train:
         # Check if a past checkpoint exists to resume training from
         checkpoint_dir = Path.cwd().joinpath("checkpoints")
