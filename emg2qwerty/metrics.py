@@ -36,7 +36,7 @@ class CharacterErrorRates(Metric):
         self.add_state("substitutions", default=torch.tensor(0), dist_reduce_fx="sum")
         self.add_state("target_len", default=torch.tensor(0), dist_reduce_fx="sum")
 
-    def update(self, prediction: LabelData, target: LabelData) -> None:
+    def update(self, prediction: LabelData, target: LabelData, printPred=False) -> None:
         # Use Levenshtein.editops rather than Levenshtein.distance to
         # break down errors into insertions, deletions and substitutions.
         editops = Levenshtein.editops(prediction.text, target.text)
@@ -47,6 +47,8 @@ class CharacterErrorRates(Metric):
         self.deletions += edits["delete"]
         self.substitutions += edits["replace"]
         self.target_len += len(target)
+        if printPred:
+            print(f"Prediction: {prediction.text}, Target: {target.text}")
 
     def compute(self) -> dict[str, float]:
         def _error_rate(errors: torch.Tensor) -> float:

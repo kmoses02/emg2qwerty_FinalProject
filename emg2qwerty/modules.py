@@ -278,3 +278,103 @@ class TDSConvEncoder(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.tds_conv_blocks(inputs)  # (T, N, num_features)
+
+'''
+My changes:
+'''
+class GoogLeWithSkip(nn.Module):
+    '''
+    GoogLeNet with 3x3, 5x5 conv and 3x3 max pool, but also with a skip connection.
+    Layers are stacked along the channel dimension.
+    Depth of final output is 3*hidden_channels*width + in_channels
+    '''
+    def __init__(self, in_channels: int, width: int, hidden_channels: int) -> None:
+        super().__init__()
+        self.in_channels = in_channels
+        self.width = width
+        self.hidden_channels = hidden_channels
+
+        self.downsize_conv = nn.Conv2d(
+            in_channels=in_channels//width,
+            out_channels=self.hidden_channels,
+            kernel_size=(1,1)
+        )
+
+        self.conv2d_k3 = nn.Conv2d(
+            in_channels=self.hidden_channels,
+            out_channels=self.hidden_channels,
+            kernel_size=(3,3),
+            padding=1
+        )
+        self.conv2d_k5 = nn.Conv2d(
+            in_channels=self.hidden_channels,
+            out_channels=self.hidden_channels,
+            kernel_size=(5,5),
+            padding=2
+        )
+        self.max_pool = nn.MaxPool2d(
+            kernel_size=(3,3),
+            stride=1,
+            padding=1
+        )
+
+        self.relu = nn.ReLU()
+        # self.layer_norm = nn.LayerNorm(channels * width)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        # print(f"Googlex in: {inputs.shape}")
+        T_in, N, C = inputs.shape  # TNC
+
+        # TNC -> NCT -> N(C/W)WT
+        x = inputs.movedim(0, -1).reshape(N, self.in_channels//self.width, self.width, T_in)
+        x_k3 = self.relu(self.conv2d_k3(self.downsize_conv(x)))
+        x_k5 = self.relu(self.conv2d_k5(self.downsize_conv(x)))
+        x_pool = self.relu(self.downsize_conv(self.max_pool(x)))
+        x = torch.cat((x_k3, x_k5, x_pool), dim=1)
+
+        x = x.reshape(N, -1, T_in).movedim(-1, 0)  #  N(C/W)WT -> NCT -> TNC
+
+        x=torch.cat((x, inputs), dim=2)
+        # print(f"Googlex out: {x.shape}")
+        return x
+
+class GRU_Wrapper(nn.Module):
+    def __init__(self, input_size, hidden_size, batch_first, bidirectional) -> None:
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.batch_first = batch_first
+        self.bidirectional = bidirectional
+
+        self.gru = nn.GRU(input_size=input_size, hidden_size=hidden_size, batch_first=batch_first, bidirectional=bidirectional)
+        # self.relu = nn.ReLU()
+        # self.layer_norm = nn.LayerNorm(channels * width)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        out, hidden_states = self.gru(inputs)
+        # print(f"GRU out: {out.shape}")
+        return out
+    
+class Conv2D_Time(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, padding) -> None:
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.conv2d = nn.Conv2d(
+            in_channels=self.in_channels,
+            out_channels=self.out_channels,
+            kernel_size=kernel_size,
+            padding=padding
+        )
+        self.relu = nn.ReLU()
+        self.layer_norm = nn.LayerNorm(out_channels)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        T_in, N, C = inputs.shape
+         # TNC -> NCT -> N(C/W)WT
+        x = inputs.movedim(0, -1).reshape(N, self.in_channels, 1, T_in)
+        x = self.conv2d(x)
+        x = x.reshape(N, -1, T_in).movedim(-1, 0)  #  N(C/W)WT -> NCT -> TNC
+        x = self.relu(x)
+        x = self.layer_norm(x)
+        return x
