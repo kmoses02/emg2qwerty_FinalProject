@@ -239,7 +239,6 @@ class TDSFullyConnectedBlock(nn.Module):
         x = x + inputs
         return self.layer_norm(x)  # TNC
 
-
 class TDSConvEncoder(nn.Module):
     """A time depth-separable convolutional encoder composing a sequence
     of `TDSConv2dBlock` and `TDSFullyConnectedBlock` as per
@@ -277,4 +276,51 @@ class TDSConvEncoder(nn.Module):
         self.tds_conv_blocks = nn.Sequential(*tds_conv_blocks)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.tds_conv_blocks(inputs)  # (T, N, num_features)
+        return self.tds_conv_blocks(inputs)
+
+class RNNEncoder(nn.Module):
+    """
+    Args:
+        num_features (int): Feature dimension of the input and output tensors.
+        hidden_size (int): Number of hidden units per direction per RNN layer.
+            (default: 256)
+        num_layers (int): Number of stacked RNN layers. (default: 3)
+        rnn_type (str): Either ``"LSTM"`` or ``"GRU"``. (default: ``"LSTM"``)
+        dropout (float): Dropout probability applied between RNN layers
+            (ignored when ``num_layers == 1``). (default: 0.2)
+        bidirectional (bool): Use bidirectional RNN. (default: True)
+    """
+
+    def __init__(
+        self,
+        num_features: int,
+        hidden_size: int = 256,
+        num_layers: int = 3,
+        rnn_type: str = "LSTM",
+        dropout: float = 0.2,
+        bidirectional: bool = True,
+    ) -> None:
+        super().__init__()
+
+        rnn_type = rnn_type.upper()
+        assert rnn_type in {"LSTM", "GRU"}, f"Unsupported rnn_type: {rnn_type}"
+
+        rnn_cls = nn.LSTM if rnn_type == "LSTM" else nn.GRU
+        self.rnn = rnn_cls(
+            input_size=num_features,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=bidirectional,
+            batch_first=False,
+        )
+
+        rnn_out_size = hidden_size * (2 if bidirectional else 1)
+        self.projection = nn.Sequential(
+            nn.Linear(rnn_out_size, num_features),
+            nn.LayerNorm(num_features),
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        x, _ = self.rnn(inputs)
+        return self.projection(x)
