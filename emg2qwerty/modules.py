@@ -347,7 +347,48 @@ class GRUEncoder(nn.Module):
         x = self.layer_norm(x)
         return x
 
+class TemporalAttention(nn.Module):
+    """Temporal attention reweighting block for CTC-compatible sequence models.
 
+    Input:
+        (T, N, C)
+
+    Output:
+        (T, N, C)
+
+    This does NOT collapse time. It computes an attention weight for each
+    time step and reweights the sequence while preserving sequence length.
+    """
+
+    def __init__(self, num_features: int, dropout: float = 0.1) -> None:
+        super().__init__()
+
+        self.score = nn.Linear(num_features, 1)
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(num_features)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            inputs: Tensor of shape (T, N, C)
+
+        Returns:
+            Tensor of shape (T, N, C)
+        """
+        # Compute scalar score per timestep: (T, N, 1)
+        scores = self.score(inputs)
+
+        # Normalize over time dimension so each sequence gets attention weights
+        # summing to 1 across T
+        attn_weights = torch.softmax(scores, dim=0)  # (T, N, 1)
+
+        # Reweight sequence, keep time dimension
+        attended = inputs * attn_weights  # (T, N, C)
+        attended = self.dropout(attended)
+
+        # Residual connection keeps original sequence information
+        outputs = self.layer_norm(inputs + attended)
+        return outputs
 
 
 

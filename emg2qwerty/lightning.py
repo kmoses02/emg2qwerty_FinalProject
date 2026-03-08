@@ -33,6 +33,7 @@ from emg2qwerty.modules import (
     MultiBandRotationInvariantMLP,
     SpectrogramNorm,
     GRUEncoder,
+    TemporalAttention,
 )
 
 class GRUCTCModule(pl.LightningModule):
@@ -57,13 +58,20 @@ class GRUCTCModule(pl.LightningModule):
         num_features = self.NUM_BANDS * mlp_features[-1]
 
         self.model = nn.Sequential(
+            # Input: (T, N, bands=2, C=16, freq)
             SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
+
+            # Output: (T, N, bands=2, mlp_features[-1])
             MultiBandRotationInvariantMLP(
                 in_features=in_features,
                 mlp_features=mlp_features,
                 num_bands=self.NUM_BANDS,
             ),
+
+            # Output: (T, N, num_features)
             nn.Flatten(start_dim=2),
+
+            # GRU temporal encoder
             GRUEncoder(
                 num_features=num_features,
                 hidden_size=hidden_size,
@@ -71,6 +79,14 @@ class GRUCTCModule(pl.LightningModule):
                 dropout=dropout,
                 bidirectional=bidirectional,
             ),
+
+            # NEW: temporal attention reweighting
+            TemporalAttention(
+                num_features=num_features,
+                dropout=dropout,
+            ),
+
+            # Output: (T, N, num_classes)
             nn.Linear(num_features, charset().num_classes),
             nn.LogSoftmax(dim=-1),
         )
@@ -85,6 +101,7 @@ class GRUCTCModule(pl.LightningModule):
                 for phase in ["train", "val", "test"]
             }
         )
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.model(inputs)
 
@@ -99,15 +116,15 @@ class GRUCTCModule(pl.LightningModule):
 
         emissions = self.forward(inputs)
 
-        # GRUEncoder does not downsample in time, so this should usually be 0.
+        # GRU + attention does not downsample in time, so this should usually be 0
         T_diff = inputs.shape[0] - emissions.shape[0]
         emission_lengths = input_lengths - T_diff
 
         loss = self.ctc_loss(
-            log_probs=emissions,                  # (T, N, num_classes)
-            targets=targets.transpose(0, 1),     # (T, N) -> (N, T)
-            input_lengths=emission_lengths,      # (N,)
-            target_lengths=target_lengths,       # (N,)
+            log_probs=emissions,              # (T, N, num_classes)
+            targets=targets.transpose(0, 1), # (T, N) -> (N, T)
+            input_lengths=emission_lengths,  # (N,)
+            target_lengths=target_lengths,   # (N,)
         )
 
         predictions = self.decoder.decode_batch(
@@ -116,10 +133,11 @@ class GRUCTCModule(pl.LightningModule):
         )
 
         metrics = self.metrics[f"{phase}_metrics"]
-        targets = targets.detach().cpu().numpy()
-        target_lengths = target_lengths.detach().cpu().numpy()
+        targets_np = targets.detach().cpu().numpy()
+        target_lengths_np = target_lengths.detach().cpu().numpy()
+
         for i in range(N):
-            target = LabelData.from_labels(targets[: target_lengths[i], i])
+            target = LabelData.from_labels(targets_np[: target_lengths_np[i], i])
             metrics.update(prediction=predictions[i], target=target)
 
         self.log(f"{phase}/loss", loss, batch_size=N, sync_dist=True)
