@@ -327,26 +327,27 @@ class GoogLeWithSkip(nn.Module):
 
         # TNC -> NCT -> N(C/W)WT
         x = inputs.movedim(0, -1).reshape(N, self.in_channels//self.width, self.width, T_in)
-        x_k3 = self.relu(self.conv2d_k3(self.downsize_conv(x)))
-        x_k5 = self.relu(self.conv2d_k5(self.downsize_conv(x)))
+        x_k3 = self.relu(self.conv2d_k3(self.relu(self.downsize_conv(x))))
+        x_k5 = self.relu(self.conv2d_k5(self.relu(self.downsize_conv(x))))
         x_pool = self.relu(self.downsize_conv(self.max_pool(x)))
         x = torch.cat((x_k3, x_k5, x_pool), dim=1)
 
         x = x.reshape(N, -1, T_in).movedim(-1, 0)  #  N(C/W)WT -> NCT -> TNC
 
-        x=torch.cat((x, inputs), dim=2)
+        #x=torch.cat((x, inputs), dim=2)
         # print(f"Googlex out: {x.shape}")
         return x
 
 class GRU_Wrapper(nn.Module):
-    def __init__(self, input_size, hidden_size, batch_first, bidirectional) -> None:
+    def __init__(self, input_size, hidden_size, batch_first, bidirectional, dropout, num_layers) -> None:
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.batch_first = batch_first
         self.bidirectional = bidirectional
+        self.num_layers=num_layers
 
-        self.gru = nn.GRU(input_size=input_size, hidden_size=hidden_size, batch_first=batch_first, bidirectional=bidirectional)
+        self.gru = nn.GRU(input_size=input_size, hidden_size=hidden_size, batch_first=batch_first, bidirectional=bidirectional, dropout=dropout, num_layers=num_layers)
         # self.relu = nn.ReLU()
         # self.layer_norm = nn.LayerNorm(channels * width)
 

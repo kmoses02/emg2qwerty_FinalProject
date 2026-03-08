@@ -230,12 +230,9 @@ class TDSConvCTCModule(pl.LightningModule):
         targets = targets.detach().cpu().numpy()
         target_lengths = target_lengths.detach().cpu().numpy()
         for i in range(N):
-          # if (i%200)==0:
-          #   print(f"loss:{loss}")
-          #   print(f"{emission_lengths} vs {target_lengths}")
           # Unpad targets (T, N) for batch entry
           target = LabelData.from_labels(targets[: target_lengths[i], i])
-          metrics.update(prediction=predictions[i], target=target, printPred=(i%1000==0))
+          metrics.update(prediction=predictions[i], target=target, printPred=(i%6000==0))
 
         self.log(f"{phase}/loss", loss, batch_size=N, sync_dist=True)
         return loss
@@ -292,6 +289,8 @@ class GoogLe_Skip_RNNModule(pl.LightningModule):
         self.width1=4
         self.width2=4
         self.bidirectional = bidirectional
+        mlp_features=[384]
+        num_features = self.NUM_BANDS * mlp_features[-1]
 
         # Model
         # inputs: (T, N, bands=2, electrode_channels=16, freq)
@@ -299,22 +298,26 @@ class GoogLe_Skip_RNNModule(pl.LightningModule):
             # (T, N, bands=2, C=16, freq)
             SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
             # (T, N, in_features*2)
-            nn.Flatten(start_dim=2),
-            Conv2D_Time(
-                in_channels=in_features*2,
-                out_channels=in_features,
-                kernel_size=(3,3),
-                padding=1
+            MultiBandRotationInvariantMLP( #put this back
+                in_features=in_features,
+                mlp_features=mlp_features,
+                num_bands=self.NUM_BANDS,
             ),
-            # (T, N 3*hidden_channels*width + in_channels)
+            nn.Flatten(start_dim=2),
+            # Conv2D_Time(
+            #     in_channels=num_features,
+            #     out_channels=num_features,
+            #     kernel_size=(3,3),
+            #     padding=1
+            # ),
+            # (T, N 3*hidden_channels*width)
             GoogLeWithSkip(
-                in_channels=in_features,
+                in_channels=num_features,
                 width=self.width1,
                 hidden_channels=hidden_channels,
             ),
             # (T, N, hidden_channels (*2 if bidirectional))
-            GRU_Wrapper(input_size=3*self.width1*hidden_channels+in_features, hidden_size=hidden_channels, batch_first=False, bidirectional=bidirectional),
-
+            GRU_Wrapper(input_size=3*self.width1*hidden_channels, hidden_size=hidden_channels, batch_first=False, bidirectional=bidirectional, dropout=0,num_layers=1),
             GoogLeWithSkip(
                 in_channels=hidden_channels * 2 if bidirectional else 1,
                 width=self.width2,
@@ -322,10 +325,27 @@ class GoogLe_Skip_RNNModule(pl.LightningModule):
             ),
             
             # (T, N, num_classes(*2 if bidirectional)
-            GRU_Wrapper(input_size=3*self.width2*hidden_channels+(hidden_channels * 2 if bidirectional else 1), hidden_size=charset().num_classes, batch_first=False, bidirectional=bidirectional),
+            GRU_Wrapper(input_size=3*self.width2*hidden_channels, hidden_size=hidden_channels, batch_first=False, bidirectional=bidirectional, dropout=0,num_layers=1),
+            
+        )
+        self.model_end =  nn.Sequential(
+            GoogLeWithSkip(
+                in_channels=hidden_channels * 2 if bidirectional else 1,
+                width=self.width2,
+                hidden_channels=hidden_channels,
+            ),
+            
+            # (T, N, num_classes(*2 if bidirectional)
+            GRU_Wrapper(input_size=3*self.width2*hidden_channels, hidden_size=hidden_channels, batch_first=False, bidirectional=bidirectional, dropout=0,num_layers=1),
+            GRU_Wrapper(input_size=hidden_channels * 2 if bidirectional else 1, hidden_size=hidden_channels//2, batch_first=False, bidirectional=bidirectional, dropout=0.1,num_layers=1),
+            nn.Dropout(p=0.05),
 
-            nn.Linear(charset().num_classes * 2 if bidirectional else 1, charset().num_classes),
+            nn.Linear(hidden_channels//2 * 2 if bidirectional else 1, charset().num_classes),
             nn.LogSoftmax(dim=-1),
+        )
+        self.fc_logsoftmax = nn.Sequential(
+          nn.Linear(hidden_channels * 2 if bidirectional else 1, charset().num_classes ),
+          nn.LogSoftmax(dim=-1)
         )
 
         # Criterion
@@ -355,26 +375,37 @@ class GoogLe_Skip_RNNModule(pl.LightningModule):
         target_lengths = batch["target_lengths"]
         N = len(input_lengths)  # batch_size
 
-        emissions = self.forward(inputs)
+        temp_emissions = self.model(inputs)
+        emissions1 = self.fc_logsoftmax(temp_emissions)
+        emissions2 = self.model_end(temp_emissions)
 
         # Shrink input lengths by an amount equivalent to the conv encoder's
         # temporal receptive field to compute output activation lengths for CTCLoss.
         # NOTE: This assumes the encoder doesn't perform any temporal downsampling
         # such as by striding.
-        T_diff = inputs.shape[0] - emissions.shape[0]
-        emission_lengths = input_lengths - T_diff
+        T_diff1 = inputs.shape[0] - emissions1.shape[0]
+        emission_lengths1 = input_lengths - T_diff1
+
+        T_diff2 = inputs.shape[0] - emissions2.shape[0]
+        emission_lengths2 = input_lengths - T_diff2
 
         loss = self.ctc_loss(
-            log_probs=emissions,  # (T, N, num_classes)
+            log_probs=emissions1,  # (T, N, num_classes)
             targets=targets.transpose(0, 1),  # (T, N) -> (N, T)
-            input_lengths=emission_lengths,  # (N,)
+            input_lengths=emission_lengths1,  # (N,)
             target_lengths=target_lengths,  # (N,)
-        )
+          ) \
+          + self.ctc_loss(
+              log_probs=emissions2,  # (T, N, num_classes)
+              targets=targets.transpose(0, 1),  # (T, N) -> (N, T)
+              input_lengths=emission_lengths2,  # (N,)
+              target_lengths=target_lengths,  # (N,)
+            )
 
         # Decode emissions
         predictions = self.decoder.decode_batch(
-            emissions=emissions.detach().cpu().numpy(),
-            emission_lengths=emission_lengths.detach().cpu().numpy(),
+            emissions=emissions2.detach().cpu().numpy(),
+            emission_lengths=emission_lengths2.detach().cpu().numpy(),
         )
 
         # Update metrics
@@ -384,9 +415,9 @@ class GoogLe_Skip_RNNModule(pl.LightningModule):
         for i in range(N):
           # Unpad targets (T, N) for batch entry
           target = LabelData.from_labels(targets[: target_lengths[i], i])
-          metrics.update(prediction=predictions[i], target=target, printPred=(i%2000==0))
+          metrics.update(prediction=predictions[i], target=target, printPred=(i%80000==0))
           # Penalize empty predictions more
-          loss += 0.01*max(0, len(target.text) - len(predictions[i].text))
+          # loss += 0.01*max(0, len(target.text) - len(predictions[i].text))
 
         self.log(f"{phase}/loss", loss, batch_size=N, sync_dist=True)
         return loss
