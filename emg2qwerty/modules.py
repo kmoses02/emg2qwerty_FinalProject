@@ -282,11 +282,11 @@ class TDSConvEncoder(nn.Module):
 '''
 My changes:
 '''
-class GoogLeWithSkip(nn.Module):
+class Inception(nn.Module):
     '''
-    GoogLeNet with 3x3, 5x5 conv and 3x3 max pool, but also with a skip connection.
+    Inception module with 3x3, 5x5 conv and 3x3 max pool.
     Layers are stacked along the channel dimension.
-    Depth of final output is 3*hidden_channels*width + in_channels
+    Depth of final output is 3*hidden_channels*width
     '''
     def __init__(self, in_channels: int, width: int, hidden_channels: int) -> None:
         super().__init__()
@@ -322,7 +322,6 @@ class GoogLeWithSkip(nn.Module):
         # self.layer_norm = nn.LayerNorm(channels * width)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        # print(f"Googlex in: {inputs.shape}")
         T_in, N, C = inputs.shape  # TNC
 
         # TNC -> NCT -> N(C/W)WT
@@ -335,7 +334,6 @@ class GoogLeWithSkip(nn.Module):
         x = x.reshape(N, -1, T_in).movedim(-1, 0)  #  N(C/W)WT -> NCT -> TNC
 
         #x=torch.cat((x, inputs), dim=2)
-        # print(f"Googlex out: {x.shape}")
         return x
 
 class GRU_Wrapper(nn.Module):

@@ -271,7 +271,7 @@ class TDSConvCTCModule(pl.LightningModule):
 My changes:
 '''
 
-class GoogLe_Skip_RNNModule(pl.LightningModule):
+class Inception_RNNModule(pl.LightningModule):
     NUM_BANDS: ClassVar[int] = 2
     ELECTRODE_CHANNELS: ClassVar[int] = 16
 
@@ -311,14 +311,14 @@ class GoogLe_Skip_RNNModule(pl.LightningModule):
             #     padding=1
             # ),
             # (T, N 3*hidden_channels*width)
-            GoogLeWithSkip(
+            Inception(
                 in_channels=num_features,
                 width=self.width1,
                 hidden_channels=hidden_channels,
             ),
             # (T, N, hidden_channels (*2 if bidirectional))
             GRU_Wrapper(input_size=3*self.width1*hidden_channels, hidden_size=hidden_channels, batch_first=False, bidirectional=bidirectional, dropout=0,num_layers=1),
-            GoogLeWithSkip(
+            Inception(
                 in_channels=hidden_channels * 2 if bidirectional else 1,
                 width=self.width2,
                 hidden_channels=hidden_channels,
@@ -329,7 +329,7 @@ class GoogLe_Skip_RNNModule(pl.LightningModule):
             
         )
         self.model_end =  nn.Sequential(
-            GoogLeWithSkip(
+            Inception(
                 in_channels=hidden_channels * 2 if bidirectional else 1,
                 width=self.width2,
                 hidden_channels=hidden_channels,
@@ -389,7 +389,7 @@ class GoogLe_Skip_RNNModule(pl.LightningModule):
         T_diff2 = inputs.shape[0] - emissions2.shape[0]
         emission_lengths2 = input_lengths - T_diff2
 
-        loss = self.ctc_loss(
+        loss = 0.5 * self.ctc_loss(
             log_probs=emissions1,  # (T, N, num_classes)
             targets=targets.transpose(0, 1),  # (T, N) -> (N, T)
             input_lengths=emission_lengths1,  # (N,)

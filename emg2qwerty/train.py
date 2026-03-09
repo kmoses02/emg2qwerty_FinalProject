@@ -89,11 +89,17 @@ def main(config: DictConfig):
     # Instantiate callbacks
     callback_configs = config.get("callbacks", [])
     callbacks = [instantiate(cfg) for cfg in callback_configs]
+    
+    # Instantiate loggers
+    logger_configs = config.get("loggers", [])
+    loggers = [instantiate(cfg) for cfg in logger_configs] if logger_configs else True
+
 
     # Initialize trainer
     trainer = pl.Trainer(
         **config.trainer,
         callbacks=callbacks,
+        logger=loggers
     )
 
     if config.train:
