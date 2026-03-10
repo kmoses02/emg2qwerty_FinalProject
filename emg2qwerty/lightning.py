@@ -271,7 +271,7 @@ class TDSConvCTCModule(pl.LightningModule):
 My changes:
 '''
 
-class Inception_RNNModule(pl.LightningModule):
+class Inception_GRU_3stack_TapOut_Module(pl.LightningModule):
     NUM_BANDS: ClassVar[int] = 2
     ELECTRODE_CHANNELS: ClassVar[int] = 16
 
@@ -452,3 +452,167 @@ class Inception_RNNModule(pl.LightningModule):
             lr_scheduler_config=self.hparams.lr_scheduler,
         )
     
+
+class Inception_GRU_2stack_Module(pl.LightningModule):
+    NUM_BANDS: ClassVar[int] = 2
+    ELECTRODE_CHANNELS: ClassVar[int] = 16
+
+    def __init__(
+        self,
+        in_features: int,
+        hidden_channels: int,
+        bidirectional: bool,
+        optimizer: DictConfig,
+        lr_scheduler: DictConfig,
+        decoder: DictConfig
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+        self.width1=4
+        self.width2=4
+        self.bidirectional = bidirectional
+        mlp_features=[384]
+        num_features = self.NUM_BANDS * mlp_features[-1]
+
+        # Model
+        # inputs: (T, N, bands=2, electrode_channels=16, freq)
+        self.model = nn.Sequential(
+            # (T, N, bands=2, C=16, freq)
+            SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
+            # (T, N, in_features*2)
+            MultiBandRotationInvariantMLP( #put this back
+                in_features=in_features,
+                mlp_features=mlp_features,
+                num_bands=self.NUM_BANDS,
+            ),
+            nn.Flatten(start_dim=2),
+            # Conv2D_Time(
+            #     in_channels=num_features,
+            #     out_channels=num_features,
+            #     kernel_size=(3,3),
+            #     padding=1
+            # ),
+            # (T, N 3*hidden_channels*width)
+            Inception(
+                in_channels=num_features,
+                width=self.width1,
+                hidden_channels=hidden_channels,
+            ),
+            # (T, N, hidden_channels (*2 if bidirectional))
+            GRU_Wrapper(input_size=3*self.width1*hidden_channels, hidden_size=hidden_channels, batch_first=False, bidirectional=bidirectional, dropout=0,num_layers=1),
+            Inception(
+                in_channels=hidden_channels * 2 if bidirectional else 1,
+                width=self.width2,
+                hidden_channels=hidden_channels,
+            ),
+            
+            # (T, N, num_classes(*2 if bidirectional)
+            GRU_Wrapper(input_size=3*self.width2*hidden_channels, hidden_size=hidden_channels, batch_first=False, bidirectional=bidirectional, dropout=0,num_layers=1),
+            Inception(
+                in_channels=hidden_channels * 2 if bidirectional else 1,
+                width=self.width2,
+                hidden_channels=hidden_channels,
+            ),
+            
+            # (T, N, num_classes(*2 if bidirectional)
+            GRU_Wrapper(input_size=3*self.width2*hidden_channels, hidden_size=hidden_channels, batch_first=False, bidirectional=bidirectional, dropout=0,num_layers=1),
+            GRU_Wrapper(input_size=hidden_channels * 2 if bidirectional else 1, hidden_size=hidden_channels//2, batch_first=False, bidirectional=bidirectional, dropout=0.1,num_layers=1),
+            nn.Dropout(p=0.05),
+
+            nn.Linear(hidden_channels//2 * 2 if bidirectional else 1, charset().num_classes),
+            nn.LogSoftmax(dim=-1),
+        )
+
+        # Criterion
+        self.ctc_loss = nn.CTCLoss(blank=charset().null_class)
+
+        # Decoder
+        self.decoder = instantiate(decoder)
+
+        # Metrics
+        metrics = MetricCollection([CharacterErrorRates()])
+        self.metrics = nn.ModuleDict(
+            {
+                f"{phase}_metrics": metrics.clone(prefix=f"{phase}/")
+                for phase in ["train", "val", "test"]
+            }
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.model(inputs)
+
+    def _step(
+        self, phase: str, batch: dict[str, torch.Tensor], *args, **kwargs
+    ) -> torch.Tensor:
+        inputs = batch["inputs"]
+        targets = batch["targets"]
+        input_lengths = batch["input_lengths"]
+        target_lengths = batch["target_lengths"]
+        N = len(input_lengths)  # batch_size
+
+        emissions = self.forward(inputs)
+
+        # Shrink input lengths by an amount equivalent to the conv encoder's
+        # temporal receptive field to compute output activation lengths for CTCLoss.
+        # NOTE: This assumes the encoder doesn't perform any temporal downsampling
+        # such as by striding.
+        T_diff = inputs.shape[0] - emissions.shape[0]
+        emission_lengths = input_lengths - T_diff
+
+
+        loss = self.ctc_loss(
+            log_probs=emissions,  # (T, N, num_classes)
+            targets=targets.transpose(0, 1),  # (T, N) -> (N, T)
+            input_lengths=emission_lengths,  # (N,)
+            target_lengths=target_lengths,  # (N,)
+          )
+
+        # Decode emissions
+        predictions = self.decoder.decode_batch(
+            emissions=emissions.detach().cpu().numpy(),
+            emission_lengths=emission_lengths.detach().cpu().numpy(),
+        )
+
+        # Update metrics
+        metrics = self.metrics[f"{phase}_metrics"]
+        targets = targets.detach().cpu().numpy()
+        target_lengths = target_lengths.detach().cpu().numpy()
+        for i in range(N):
+          # Unpad targets (T, N) for batch entry
+          target = LabelData.from_labels(targets[: target_lengths[i], i])
+          metrics.update(prediction=predictions[i], target=target, printPred=(i%100000==0))
+          # Penalize empty predictions more
+          # loss += 0.01*max(0, len(target.text) - len(predictions[i].text))
+
+        self.log(f"{phase}/loss", loss, batch_size=N, sync_dist=True)
+        return loss
+
+    def _epoch_end(self, phase: str) -> None:
+        metrics = self.metrics[f"{phase}_metrics"]
+        self.log_dict(metrics.compute(), sync_dist=True)
+        metrics.reset()
+
+    def training_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("train", *args, **kwargs)
+
+    def validation_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("val", *args, **kwargs)
+
+    def test_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("test", *args, **kwargs)
+
+    def on_train_epoch_end(self) -> None:
+        self._epoch_end("train")
+
+    def on_validation_epoch_end(self) -> None:
+        self._epoch_end("val")
+
+    def on_test_epoch_end(self) -> None:
+        self._epoch_end("test")
+
+    def configure_optimizers(self) -> dict[str, Any]:
+        return utils.instantiate_optimizer_and_scheduler(
+            self.parameters(),
+            optimizer_config=self.hparams.optimizer,
+            lr_scheduler_config=self.hparams.lr_scheduler,
+        )

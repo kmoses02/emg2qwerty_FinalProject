@@ -1,6 +1,6 @@
 # @package _global_
 module:
-  _target_: emg2qwerty.lightning.Inception_RNNModule
+  _target_: emg2qwerty.lightning.Inception_GRU_3stack_TapOut_Module
   in_features: 528  # freq * channels = (n_fft // 2 + 1) * 16
   hidden_channels: 128 # for googlenet, how many channels to reduce input to
   bidirectional: True
