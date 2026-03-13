@@ -1,5 +1,6 @@
+GRU notebook is located on branch: RNN-GRU, file: emg2qwerty_GRU.ipynb
 
-Configs and figures from the best run can be found here: Branch: RNN-GRU > /best_performance
+GRU-RAU notebook is located on branch: GRU-RAU, file: emg2qwert_GRU-RAU.ipynb
 
 CNN+GRU implementation is in Inception-GRU branch. graphs/* shows performance plots.
 
