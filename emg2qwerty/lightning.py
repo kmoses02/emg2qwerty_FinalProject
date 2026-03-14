@@ -272,6 +272,9 @@ My changes:
 '''
 
 class Inception_GRU_3stack_TapOut_Module(pl.LightningModule):
+    '''
+    3 stacks of inception-gru layers & auxillary loss from after the 2nd stack.
+    '''
     NUM_BANDS: ClassVar[int] = 2
     ELECTRODE_CHANNELS: ClassVar[int] = 16
 
@@ -298,7 +301,7 @@ class Inception_GRU_3stack_TapOut_Module(pl.LightningModule):
             # (T, N, bands=2, C=16, freq)
             SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
             # (T, N, in_features*2)
-            MultiBandRotationInvariantMLP( #put this back
+            MultiBandRotationInvariantMLP(
                 in_features=in_features,
                 mlp_features=mlp_features,
                 num_bands=self.NUM_BANDS,
@@ -323,29 +326,26 @@ class Inception_GRU_3stack_TapOut_Module(pl.LightningModule):
                 width=self.width2,
                 hidden_channels=hidden_channels,
             ),
-            
-            # (T, N, num_classes(*2 if bidirectional)
             GRU_Wrapper(input_size=3*self.width2*hidden_channels, hidden_size=hidden_channels, batch_first=False, bidirectional=bidirectional, dropout=0,num_layers=1),
-            
         )
+        self.fc_logsoftmax = nn.Sequential(
+          nn.Linear(hidden_channels * 2 if bidirectional else 1, charset().num_classes ),
+          nn.LogSoftmax(dim=-1)
+        ) # auxiliary loss to be calculated from here
+
+        # Seperate model to recieve the output of the 2nd inception-gru stack
         self.model_end =  nn.Sequential(
             Inception(
                 in_channels=hidden_channels * 2 if bidirectional else 1,
                 width=self.width2,
                 hidden_channels=hidden_channels,
             ),
-            
-            # (T, N, num_classes(*2 if bidirectional)
             GRU_Wrapper(input_size=3*self.width2*hidden_channels, hidden_size=hidden_channels, batch_first=False, bidirectional=bidirectional, dropout=0,num_layers=1),
             GRU_Wrapper(input_size=hidden_channels * 2 if bidirectional else 1, hidden_size=hidden_channels//2, batch_first=False, bidirectional=bidirectional, dropout=0.1,num_layers=1),
             nn.Dropout(p=0.05),
 
             nn.Linear(hidden_channels//2 * 2 if bidirectional else 1, charset().num_classes),
             nn.LogSoftmax(dim=-1),
-        )
-        self.fc_logsoftmax = nn.Sequential(
-          nn.Linear(hidden_channels * 2 if bidirectional else 1, charset().num_classes ),
-          nn.LogSoftmax(dim=-1)
         )
 
         # Criterion
@@ -454,6 +454,9 @@ class Inception_GRU_3stack_TapOut_Module(pl.LightningModule):
     
 
 class Inception_GRU_2stack_Module(pl.LightningModule):
+    '''
+    2 stacks of inception-gru layers.
+    '''
     NUM_BANDS: ClassVar[int] = 2
     ELECTRODE_CHANNELS: ClassVar[int] = 16
 
