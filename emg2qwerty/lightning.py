@@ -480,7 +480,7 @@ class Inception_GRU_2stack_Module(pl.LightningModule):
             # (T, N, bands=2, C=16, freq)
             SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
             # (T, N, in_features*2)
-            MultiBandRotationInvariantMLP( #put this back
+            MultiBandRotationInvariantMLP(
                 in_features=in_features,
                 mlp_features=mlp_features,
                 num_bands=self.NUM_BANDS,
@@ -505,16 +505,12 @@ class Inception_GRU_2stack_Module(pl.LightningModule):
                 width=self.width2,
                 hidden_channels=hidden_channels,
             ),
-            
-            # (T, N, num_classes(*2 if bidirectional)
             GRU_Wrapper(input_size=3*self.width2*hidden_channels, hidden_size=hidden_channels, batch_first=False, bidirectional=bidirectional, dropout=0,num_layers=1),
             Inception(
                 in_channels=hidden_channels * 2 if bidirectional else 1,
                 width=self.width2,
                 hidden_channels=hidden_channels,
             ),
-            
-            # (T, N, num_classes(*2 if bidirectional)
             GRU_Wrapper(input_size=3*self.width2*hidden_channels, hidden_size=hidden_channels, batch_first=False, bidirectional=bidirectional, dropout=0,num_layers=1),
             GRU_Wrapper(input_size=hidden_channels * 2 if bidirectional else 1, hidden_size=hidden_channels//2, batch_first=False, bidirectional=bidirectional, dropout=0.1,num_layers=1),
             nn.Dropout(p=0.05),
